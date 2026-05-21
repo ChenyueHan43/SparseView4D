@@ -1,213 +1,220 @@
-# Deformable 3D Gaussians for High-Fidelity Monocular Dynamic Scene Reconstruction
+# SparseView4D: Lightweight Sparse-View 4D Dynamic Scene Reconstruction
 
-## [Project page](https://ingra14m.github.io/Deformable-Gaussians/) | [Paper](https://arxiv.org/abs/2309.13101)
+**A Lightweight Sparse-View 4D Dynamic Scene Reconstruction Pipeline Based on Deformable 3D Gaussian Splatting**
 
-![Teaser image](assets/teaser.png)
+Chenyue Han · Computer Vision · Spring 2026 · New York University · ch5085@nyu.edu
 
-This repository contains the official implementation associated with the paper "Deformable 3D Gaussians for High-Fidelity Monocular Dynamic Scene Reconstruction".
+---
 
+## Overview
 
+Reconstructing dynamic 3D scenes from sparse multi-view inputs remains a fundamental challenge in computer vision. Existing methods such as Deformable 3DGS assume dense camera setups (50–100+ views), which are impractical in consumer and robotic settings.
 
-## News
+This project investigates how far a dynamic scene reconstruction pipeline can be pushed under **sparse-view constraints (N ∈ {4, 6, 8} views)**, and proposes three lightweight interventions on top of [Deformable 3DGS](https://github.com/ingra14m/Deformable-3D-Gaussians):
 
-- **[5/26/2024]** [Lightweight-Deformable-GS](https://github.com/ingra14m/Lightweight-Deformable-GS) has been integrated into this repo. For the original version aligned with paper, please check the [paper](https://github.com/ingra14m/Deformable-3D-Gaussians/tree/paper) branch.
-- **[5/24/2024]** An optimized version [Lightweight-Deformable-GS](https://github.com/ingra14m/Lightweight-Deformable-GS) has been released. It offers 50% reduced storage, 200% increased FPS, and no decrease in rendering metrics.
-- **[2/27/2024]** Deformable-GS is accepted by CVPR 2024. Our another work, [SC-GS](https://yihua7.github.io/SC-GS-web/) (with higher quality, less points and faster FPS than vanilla 3D-GS), is also accepted. See you in Seattle.
-- **[11/16/2023]** Full code and real-time viewer released.
-- **[11/4/2023]** update the computation of LPIPS in metrics.py. Previously, the `lpipsPyTorch` was unable to execute on CUDA, prompting us to switch to the `lpips` library (~20x faster).
-- **[10/25/2023]** update **real-time viewer** on project page. Many, many thanks to @[yihua7](https://github.com/yihua7) for implementing the real-time viewer adapted for Deformable-GS. Also, thanks to @[ashawkey](https://github.com/ashawkey) for releasing the original GUI.
+1. **Depth-guided initialization** — uses Depth Anything V2 to replace random point cloud initialization with geometry-aware priors
+2. **Temporal smoothness regularization** — penalizes large changes in the deformation field across neighboring timesteps
+3. **Multi-frame photometric supervision** — simultaneously renders neighboring frames to enforce temporal coherence
 
+**Key result**: Depth-guided initialization consistently improves perceptual quality (SSIM +0.09, LPIPS −0.07 on average) under sparse-view constraints.
 
+---
 
-## Dataset
+## Method
 
-In our paper, we use:
+### Baseline Problem
 
-- synthetic dataset from [D-NeRF](https://www.albertpumarola.com/research/D-NeRF/index.html).
-- real-world dataset from [NeRF-DS](https://jokeryan.github.io/projects/nerf-ds/) and [Hyper-NeRF](https://hypernerf.github.io/).
-- The dataset in the supplementary materials comes from [DeVRF](https://jia-wei-liu.github.io/DeVRF/).
+Under the original dense setup (50–200 views), Deformable 3DGS achieves strong results (e.g., PSNR 37.50 on *jumpingjacks*). With only 4–8 views, two failure modes emerge:
 
-We organize the datasets as follows:
+- **Gaussian explosion**: random initialization has no geometric grounding; Gaussians drift or grow unboundedly
+- **Degenerate deformation**: the MLP deformation field is severely under-constrained with so few viewpoints
 
-```shell
-├── data
-│   | D-NeRF 
-│     ├── hook
-│     ├── standup 
-│     ├── ...
-│   | NeRF-DS
-│     ├── as
-│     ├── basin
-│     ├── ...
-│   | HyperNeRF
-│     ├── interp
-│     ├── misc
-│     ├── vrig
+PSNR drops from 37.50 dB (dense) to 14.60 dB (4-view) — a gap of over 22 dB.
+
+### Depth-Guided Initialization
+
+For each training frame:
+1. Estimate a depth map using **Depth Anything V2**
+2. Apply percentile clipping (5th–95th) to remove outliers
+3. **Scale alignment**: set the median depth equal to the camera-to-scene-center distance
+4. Back-project depth pixels to 3D world coordinates
+5. Fuse point clouds from all N frames into a single ~25K-point geometry-aware initialization
+
+### Temporal Constraints
+
+**Deformation Smoothness Loss:**
+
+```
+L_smooth = ||d(t) - d(t-Δt)||² + ||d(t) - d(t+Δt)||²
 ```
 
-> I have identified an **inconsistency in the D-NeRF's Lego dataset**. Specifically, the scenes corresponding to the training set differ from those in the test set. This discrepancy can be verified by observing the angle of the flipped Lego shovel. To meaningfully evaluate the performance of our method on this dataset, I recommend using the **validation set of the Lego dataset** as the test set. See more in [D-NeRF dataset used in Deformable-GS](https://github.com/ingra14m/Deformable-3D-Gaussians/releases/tag/v0.1-pre-released)
+**Multi-Frame Photometric Supervision:**
 
-
-
-## Pipeline
-
-![Teaser image](assets/pipeline.png)
-
-
-
-## Run
-
-### Environment
-
-```shell
-git clone https://github.com/ingra14m/Deformable-3D-Gaussians --recursive
-cd Deformable-3D-Gaussians
-
-conda create -n deformable_gaussian_env python=3.7
-conda activate deformable_gaussian_env
-
-# install pytorch
-pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
-
-# install dependencies
-pip install -r requirements.txt
+```
+L_mf = Σ L_photo(rendered(t+δ), gt(t+δ))  for δ ∈ {-Δt, +Δt}
 ```
 
+**Full Training Objective:**
 
-
-### Train
-
-**D-NeRF:**
-
-```shell
-python train.py -s path/to/your/d-nerf/dataset -m output/exp-name --eval --is_blender
+```
+L = L_photo + λ_t · L_smooth + λ_mf · L_mf
 ```
 
-**NeRF-DS/HyperNeRF:**
+where `λ_t = 0.01` and `λ_mf = 0.5` by default.
 
-```shell
-python train.py -s path/to/your/real-world/dataset -m output/exp-name --eval --iterations 20000
-```
-
-**6DoF Transformation:**
-
-We have also implemented the 6DoF transformation of 3D-GS, which may lead to an improvement in metrics but will reduce the speed of training and inference.
-
-```shell
-# D-NeRF
-python train.py -s path/to/your/d-nerf/dataset -m output/exp-name --eval --is_blender --is_6dof
-
-# NeRF-DS & HyperNeRF
-python train.py -s path/to/your/real-world/dataset -m output/exp-name --eval --is_6dof --iterations 20000
-```
-
-You can also **train with the GUI:**
-
-```shell
-python train_gui.py -s path/to/your/dataset -m output/exp-name --eval --is_blender
-```
-
-- click `start` to start training, and click `stop` to stop training.
-- The GUI viewer is still under development, many buttons do not have corresponding functions currently. We plan to :
-  - [ ] reload checkpoints from the pre-trained model.
-  - [ ] Complete the functions of the other vacant buttons in the GUI.
-
-
-
-### Render & Evaluation
-
-```shell
-python render.py -m output/exp-name --mode render
-python metrics.py -m output/exp-name
-```
-
-We provide several modes for rendering:
-
-- `render`: render all the test images
-- `time`: time interpolation tasks for D-NeRF dataset
-- `all`: time and view synthesis tasks for D-NeRF dataset
-- `view`: view synthesis tasks for D-NeRF dataset
-- `original`: time and view synthesis tasks for real-world dataset
-
-
+---
 
 ## Results
 
-### D-NeRF Dataset
+### jumpingjacks
 
-**Quantitative Results**
+| Method | Views | PSNR↑ | SSIM↑ | LPIPS↓ |
+|--------|-------|-------|-------|--------|
+| Dense (reference) | 200 | 37.50 | 0.9894 | 0.0138 |
+| Baseline | 8 | 19.09 | 0.8873 | 0.1183 |
+| Baseline | 6 | 15.48 | 0.7855 | 0.2179 |
+| Baseline | 4 | 14.60 | 0.7759 | 0.2316 |
+| **+Depth Init** | 8 | 16.92 | **0.9062** | **0.1012** |
+| **+Depth Init** | 6 | 16.93 | **0.9064** | **0.1007** |
+| **+Depth Init** | 4 | 16.00 | **0.8709** | **0.1343** |
+| +Depth+Smooth | 4 | 16.06 | 0.8727 | 0.1330 |
+| +Depth+MF | 4 | 16.05 | 0.8720 | 0.1338 |
 
-<img src="assets/results/D-NeRF/Quantitative.jpg" alt="Image1" style="zoom:50%;" />
+### standup
 
-**Qualitative Results**
+| Method | Views | PSNR↑ | SSIM↑ | LPIPS↓ |
+|--------|-------|-------|-------|--------|
+| Dense (reference) | — | 43.88 | 0.9943 | 0.0083 |
+| Baseline | 4 | 19.29 | 0.7970 | 0.1679 |
+| **+Depth+Smooth** | 4 | **18.96** | **0.9021** | **0.0936** |
 
- <img src="assets/results/D-NeRF/bouncing.gif" alt="Image1" style="zoom:25%;" />  <img src="assets/results/D-NeRF/hell.gif" alt="Image1" style="zoom:25%;" />  <img src="assets/results/D-NeRF/hook.gif" alt="Image3" style="zoom:25%;" />  <img src="assets/results/D-NeRF/jump.gif" alt="Image4" style="zoom:25%;" /> 
+Depth-guided initialization closes approximately **60% of the sparse-to-dense gap** on SSIM at the hardest 4-view setting.
 
- <img src="assets/results/D-NeRF/lego.gif" alt="Image5" style="zoom:25%;" />  <img src="assets/results/D-NeRF/mutant.gif" alt="Image6" style="zoom:25%;" />  <img src="assets/results/D-NeRF/stand.gif" alt="Image7" style="zoom:25%;" />  <img src="assets/results/D-NeRF/trex.gif" alt="Image8" style="zoom:25%;" /> 
+---
 
-**400x400 Resolution**
+## Code Structure
 
-|          | PSNR  | SSIM   | LPIPS (VGG) | FPS  | Mem   | Num. (k) |
-| -------- | ----- | ------ | ----------- | ---- | ----- | -------- |
-| bouncing | 41.46 | 0.9958 | 0.0046      | 112  | 13.16 | 55622    |
-| hell     | 42.11 | 0.9885 | 0.0153      | 375  | 3.72  | 15733    |
-| hook     | 37.77 | 0.9897 | 0.0103      | 128  | 11.74 | 49613    |
-| jump     | 39.10 | 0.9930 | 0.0090      | 217  | 6.81  | 28808    |
-| mutant   | 43.73 | 0.9969 | 0.0029      | 124  | 11.45 | 48423    |
-| standup  | 45.38 | 0.9967 | 0.0032      | 210  | 5.94  | 25102    |
-| trex     | 38.40 | 0.9959 | 0.0041      | 85   | 18.6  | 78624    |
-| Average  | 41.14 | 0.9938 | 0.0070      | 179  | 10.20 | 43132    |
+```
+SparseView4D/
+├── train.py                  # Main training script (modified)
+├── render.py                 # Rendering and evaluation
+├── metrics.py                # PSNR / SSIM / LPIPS evaluation
+├── convert.py                # Dataset conversion utilities
+├── arguments/
+│   └── __init__.py           # Training arguments (modified: added sparse-view flags)
+├── scene/
+│   ├── __init__.py           # Scene loader (modified: depth-guided init)
+│   ├── dataset_readers.py    # Dataset I/O (modified: depth map support)
+│   └── gaussian_model.py     # 3D Gaussian representation
+├── gaussian_renderer/        # Differentiable Gaussian renderer
+├── utils/
+│   ├── loss_utils.py         # Loss functions (modified: added ARAP, temporal losses)
+│   └── ...
+├── submodules/
+│   ├── depth-diff-gaussian-rasterization/  # Custom CUDA rasterizer
+│   └── simple-knn/                          # KNN for Gaussian densification
+├── lpipsPyTorch/             # Perceptual loss
+└── paper.pdf                 # Final report
+```
 
-### NeRF-DS Dataset
+### Key Modifications vs. Original Deformable 3DGS
 
-<img src="assets/results/NeRF-DS/Quantitative.jpg" alt="Image1" style="zoom:50%;" />
+| File | Change |
+|------|--------|
+| `scene/__init__.py` | Depth-guided point cloud initialization |
+| `scene/dataset_readers.py` | Load and preprocess depth maps |
+| `train.py` | Multi-frame loss, temporal smoothness loss, ARAP loss |
+| `utils/loss_utils.py` | Added `arap_loss()` for rigidity regularization |
+| `arguments/__init__.py` | New flags: `--use_temporal_smooth`, `--use_arap`, `--lambda_multiframe` |
 
-See more visualization on our [project page](https://ingra14m.github.io/Deformable-Gaussians/).
+---
 
+## Setup
 
+### Environment
 
-### HyperNeRF Dataset
+```bash
+git clone https://github.com/ChenyueHan43/SparseView4D --recursive
+cd SparseView4D
 
-Since the **camera pose** in HyperNeRF is less precise compared to NeRF-DS, we use HyperNeRF as a reference for partial visualization and the display of Failure Cases, but do not include it in the calculation of quantitative metrics. The results of the HyperNeRF dataset can be viewed on the [project page](https://ingra14m.github.io/Deformable-Gaussians/).
+conda create -n sparseview4d python=3.7
+conda activate sparseview4d
 
+pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
+pip install -r requirements.txt
+```
 
+### Dataset
 
-### Real-Time Viewer
+Download the [D-NeRF synthetic dataset](https://www.albertpumarola.com/research/D-NeRF/index.html) and organize as:
 
-https://github.com/ingra14m/Deformable-3D-Gaussians/assets/63096187/ec26d0b9-c126-4e23-b773-dcedcf386f36
+```
+data/
+└── D-NeRF/
+    ├── jumpingjacks/
+    ├── standup/
+    └── ...
+```
 
+---
 
+## Training
+
+**Baseline (sparse-view, no modifications):**
+```bash
+python train.py -s data/D-NeRF/jumpingjacks -m output/baseline_4view \
+    --eval --is_blender --num_views 4
+```
+
+**With depth-guided initialization:**
+```bash
+python train.py -s data/D-NeRF/jumpingjacks -m output/depth_4view \
+    --eval --is_blender --num_views 4 --use_depth_init
+```
+
+**With all temporal constraints:**
+```bash
+python train.py -s data/D-NeRF/jumpingjacks -m output/full_4view \
+    --eval --is_blender --num_views 4 --use_depth_init \
+    --use_temporal_smooth --lambda_temporal 0.01 \
+    --lambda_multiframe 0.5
+```
+
+### Key Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--use_depth_init` | False | Enable depth-guided initialization |
+| `--use_temporal_smooth` | False | Enable deformation smoothness regularization |
+| `--lambda_temporal` | 0.01 | Weight for temporal smoothness loss |
+| `--lambda_multiframe` | 0.5 | Weight for multi-frame photometric loss |
+| `--use_arap` | False | Enable ARAP rigidity regularization |
+| `--lambda_arap` | 0.01 | Weight for ARAP loss |
+
+---
+
+## Evaluation
+
+```bash
+python render.py -m output/depth_4view --mode render
+python metrics.py -m output/depth_4view
+```
+
+---
+
+## Failure Cases
+
+On the *trex* scene, depth-guided initialization degrades performance (PSNR 15.3 vs. baseline 17.5–18.9). Two factors contribute:
+- Complex backgrounds produce noisy depth estimates from Depth Anything V2
+- Scale alignment based on camera-to-scene-center distance fails when scene geometry deviates from this assumption
+
+Future directions: foreground-aware depth filtering, visibility-aware Gaussian densification, multi-view consistent initialization (e.g., DUSt3R).
+
+---
 
 ## Acknowledgments
 
-We sincerely thank the authors of [3D-GS](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/), [D-NeRF](https://www.albertpumarola.com/research/D-NeRF/index.html), [HyperNeRF](https://hypernerf.github.io/), [NeRF-DS](https://jokeryan.github.io/projects/nerf-ds/), and [DeVRF](https://jia-wei-liu.github.io/DeVRF/), whose codes and datasets were used in our work. We thank [Zihao Wang](https://github.com/Alen-Wong) for the debugging in the early stage, preventing this work from sinking. We also thank the reviewers and AC for not being influenced by PR, and fairly evaluating our work. This work was mainly supported by ByteDance MMLab.
-
-
-
-
-## BibTex
-
-```
-@article{yang2023deformable3dgs,
-    title={Deformable 3D Gaussians for High-Fidelity Monocular Dynamic Scene Reconstruction},
-    author={Yang, Ziyi and Gao, Xinyu and Zhou, Wen and Jiao, Shaohui and Zhang, Yuqing and Jin, Xiaogang},
-    journal={arXiv preprint arXiv:2309.13101},
-    year={2023}
-}
-```
-
-And thanks to the authors of [3D Gaussians](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) for their excellent code, please consider also cite this repository:
-
-```
-@Article{kerbl3Dgaussians,
-      author       = {Kerbl, Bernhard and Kopanas, Georgios and Leimk{\"u}hler, Thomas and Drettakis, George},
-      title        = {3D Gaussian Splatting for Real-Time Radiance Field Rendering},
-      journal      = {ACM Transactions on Graphics},
-      number       = {4},
-      volume       = {42},
-      month        = {July},
-      year         = {2023},
-      url          = {https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/}
-}
-```
-
+Built on top of [Deformable 3D Gaussians](https://github.com/ingra14m/Deformable-3D-Gaussians) (Yang et al., CVPR 2024).
+Depth estimation via [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) (Yang et al., NeurIPS 2024).
+Evaluated on the [D-NeRF](https://www.albertpumarola.com/research/D-NeRF/index.html) synthetic benchmark.
+Experiments conducted on NVIDIA L40S and H200 GPUs at NYU HPC (Torch cluster).
