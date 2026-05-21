@@ -12,7 +12,7 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, kl_divergence
+from utils.loss_utils import l1_loss, ssim, kl_divergence, arap_loss
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel, DeformModel
@@ -106,6 +106,47 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+
+        # Multi-frame supervision
+        if iteration >= opt.warm_up and dataset.use_multiframe:
+            all_cams_sorted = sorted(scene.getTrainCameras(), key=lambda c: c.fid)
+            fid_vals = [c.fid for c in all_cams_sorted]
+            cur_fid = fid.item()
+            for delta in [-time_interval, time_interval]:
+                target_fid = cur_fid + delta
+                if target_fid < 0.0 or target_fid > 1.0:
+                    continue
+                # 找最近的相机
+                closest_idx = min(range(len(fid_vals)), key=lambda i: abs(fid_vals[i] - target_fid))
+                neighbor_cam = all_cams_sorted[closest_idx]
+                if dataset.load2gpu_on_the_fly:
+                    neighbor_cam.load2device()
+                neighbor_fid = neighbor_cam.fid
+                neighbor_time = neighbor_fid.unsqueeze(0).expand(N, -1)
+                d_xyz_n, d_rot_n, d_scl_n = deform.step(gaussians.get_xyz.detach(), neighbor_time)
+                render_n = render(neighbor_cam, gaussians, pipe, background, d_xyz_n, d_rot_n, d_scl_n, dataset.is_6dof)
+                image_n = render_n["render"]
+                gt_n = neighbor_cam.original_image.cuda()
+                Ll1_n = l1_loss(image_n, gt_n)
+                loss_n = (1.0 - opt.lambda_dssim) * Ll1_n + opt.lambda_dssim * (1.0 - ssim(image_n, gt_n))
+                loss = loss + dataset.lambda_multiframe * loss_n
+
+        # ARAP rigidity constraint
+        if iteration >= opt.warm_up and dataset.use_arap and iteration % 10 == 0:
+            L_arap = arap_loss(gaussians.get_xyz.detach(), d_xyz, k=8)
+            loss = loss + dataset.lambda_arap * L_arap
+
+        # Temporal regularization
+        if iteration >= opt.warm_up and dataset.use_temporal_smooth:
+            fid_prev = (fid - time_interval).clamp(0.0, 1.0)
+            fid_next = (fid + time_interval).clamp(0.0, 1.0)
+            time_prev = fid_prev.unsqueeze(0).expand(N, -1)
+            time_next = fid_next.unsqueeze(0).expand(N, -1)
+            d_xyz_prev, _, _ = deform.step(gaussians.get_xyz.detach(), time_prev)
+            d_xyz_next, _, _ = deform.step(gaussians.get_xyz.detach(), time_next)
+            L_smooth = (d_xyz - d_xyz_prev).norm(dim=-1).mean() + (d_xyz - d_xyz_next).norm(dim=-1).mean()
+            loss = loss + dataset.lambda_temporal * L_smooth
+
         loss.backward()
 
         iter_end.record()

@@ -74,3 +74,67 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
+
+
+def find_knn_chunked(xyz, k=8, chunk_size=2000):
+    """分块计算 KNN，避免 N×N OOM"""
+    N = xyz.shape[0]
+    idx_list = []
+    for i in range(0, N, chunk_size):
+        chunk = xyz[i:i+chunk_size]
+        diff = chunk.unsqueeze(1) - xyz.unsqueeze(0)  # [C, N, 3]
+        dist = (diff ** 2).sum(-1)  # [C, N]
+        _, idx = dist.topk(k + 1, dim=1, largest=False)
+        idx_list.append(idx[:, 1:])  # 去掉自身
+    return torch.cat(idx_list, dim=0)  # [N, k]
+
+
+def arap_loss(xyz, d_xyz, k=8):
+    """
+    As-Rigid-As-Possible 刚性约束
+    要求相邻 Gaussian 之间的相对位置在变形前后保持一致
+    xyz:   [N, 3] 变形前位置
+    d_xyz: [N, 3] 变形量
+    """
+    import torch
+
+    N = xyz.shape[0]
+    xyz_deformed = xyz + d_xyz
+
+    # 找 K 近邻
+    with torch.no_grad():
+        knn_idx = find_knn_chunked(xyz.detach(), k=k)  # [N, k]
+
+    # 变形前相对位置
+    xyz_j = xyz[knn_idx]           # [N, k, 3]
+    xyz_i = xyz.unsqueeze(1).expand_as(xyz_j)
+    e_before = xyz_i - xyz_j       # [N, k, 3]
+
+    # 变形后相对位置
+    xyz_def_j = xyz_deformed[knn_idx]
+    xyz_def_i = xyz_deformed.unsqueeze(1).expand_as(xyz_def_j)
+    e_after = xyz_def_i - xyz_def_j  # [N, k, 3]
+
+    # 用 SVD 估计局部最优旋转 R_i
+    # S = e_before^T @ e_after  -> [N, 3, 3]
+    S = torch.bmm(
+        e_before.transpose(1, 2),   # [N, 3, k]
+        e_after                      # [N, k, 3]
+    )  # [N, 3, 3]
+
+    try:
+        U, _, Vh = torch.linalg.svd(S)
+        R = torch.bmm(Vh.transpose(-2, -1), U.transpose(-2, -1))  # [N, 3, 3]
+    except Exception:
+        # SVD 失败时退化为 L2
+        loss = ((e_after - e_before) ** 2).sum(-1).mean()
+        return loss
+
+    # 刚性误差：||e_after - R @ e_before||^2
+    e_before_rot = torch.bmm(
+        e_before,           # [N, k, 3]
+        R.transpose(-2, -1) # [N, 3, 3]
+    )  # [N, k, 3]
+
+    loss = ((e_after - e_before_rot) ** 2).sum(-1).mean()
+    return loss

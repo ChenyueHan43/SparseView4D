@@ -266,10 +266,10 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
     return cam_infos
 
 
-def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
+def readNerfSyntheticInfo(path, white_background, eval, extension=".png", train_json="transforms_train.json", init_ply=""):
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(
-        path, "transforms_train.json", white_background, extension)
+        path, train_json, white_background, extension)
     print("Reading Test Transforms")
     test_cam_infos = readCamerasFromTransforms(
         path, "transforms_test.json", white_background, extension)
@@ -280,7 +280,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, "points3d.ply")
+    ply_path = init_ply if init_ply and os.path.exists(init_ply) else os.path.join(path, "points3d.ply")
     if not os.path.exists(ply_path):
         # Since this data set has no colmap data, we start with random points
         num_pts = 100_000

@@ -59,6 +59,14 @@ class ModelParams(ParamGroup):
         self.eval = False
         self.load2gpu_on_the_fly = False
         self.is_blender = False
+        self.train_json = "transforms_train.json"
+        self.init_ply = ""
+        self.use_temporal_smooth = False
+        self.lambda_temporal = 0.01
+        self.use_arap = False
+        self.lambda_arap = 0.01
+        self.use_multiframe = False
+        self.lambda_multiframe = 0.5
         self.is_6dof = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
